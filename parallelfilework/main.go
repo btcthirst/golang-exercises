@@ -1,12 +1,14 @@
 package main
 
 import (
+	"archive/zip"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
 
-	"github.com/unidoc/unioffice/document"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -41,23 +43,59 @@ func readExcelFile(path string, out chan<- []DataRow, wg *sync.WaitGroup) {
 
 func readWordFile(path string, out chan<- []DataRow, wg *sync.WaitGroup) {
 	defer wg.Done()
-	doc, err := document.Open(path)
+
+	r, err := zip.OpenReader(path)
 	if err != nil {
-		fmt.Println("Помилка Word:", err)
+		fmt.Println("Помилка відкриття DOCX:", err)
 		return
 	}
+	defer r.Close()
 
 	var result []DataRow
-	for _, para := range doc.Paragraphs() {
-		var textParts []string
-		for _, run := range para.Runs() {
-			textParts = append(textParts, run.Text())
-		}
-		text := strings.Join(textParts, "")
-		if strings.TrimSpace(text) != "" {
-			result = append(result, DataRow{Source: path, Text: text})
+
+	for _, f := range r.File {
+		if f.Name == "word/document.xml" {
+			rc, err := f.Open()
+			if err != nil {
+				fmt.Println("Помилка читання document.xml:", err)
+				return
+			}
+			defer rc.Close()
+
+			decoder := xml.NewDecoder(rc)
+			var text string
+
+			for {
+				tok, err := decoder.Token()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					fmt.Println("XML помилка:", err)
+					return
+				}
+
+				switch se := tok.(type) {
+				case xml.StartElement:
+					if se.Name.Local == "t" {
+						var content string
+						if err := decoder.DecodeElement(&content, &se); err == nil {
+							text += content
+						}
+					}
+				}
+			}
+
+			// Розділяємо за абзацами
+			for _, line := range strings.Split(text, "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					result = append(result, DataRow{Source: path, Text: line})
+				}
+			}
 		}
 	}
+
 	out <- result
 }
 
