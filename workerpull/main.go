@@ -1,54 +1,72 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
-	"math/rand"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
 
-// Структура задачі
 type Job struct {
-	ID       int
-	Workload int
+	ID   int
+	Path string
 }
 
-// Структура результату
 type Result struct {
 	Job       Job
-	Output    int
+	LineCount int
 	WorkerID  int
 	Processed time.Duration
+	Err       error
 }
 
-// Воркер
 func worker(id int, jobs <-chan Job, results chan<- Result, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for job := range jobs {
 		start := time.Now()
-
-		// Симуляція роботи
-		time.Sleep(time.Millisecond * time.Duration(job.Workload))
+		lineCount, err := countLines(job.Path)
 
 		result := Result{
 			Job:       job,
-			Output:    job.Workload * 2, // умовна обробка
+			LineCount: lineCount,
 			WorkerID:  id,
 			Processed: time.Since(start),
+			Err:       err,
 		}
 		results <- result
 	}
 }
 
-// Головна функція
-func main() {
-	const (
-		numJobs    = 10
-		numWorkers = 3
-	)
+// Простий підрахунок рядків у файлі
+func countLines(path string) (int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
 
-	jobs := make(chan Job, numJobs)
-	results := make(chan Result, numJobs)
+	scanner := bufio.NewScanner(file)
+	count := 0
+	for scanner.Scan() {
+		count++
+	}
+	return count, scanner.Err()
+}
+
+func main() {
+	const numWorkers = 4
+
+	// Знаходимо всі .txt файли в поточній директорії
+	files, err := filepath.Glob("*.txt")
+	if err != nil {
+		fmt.Println("Помилка пошуку файлів:", err)
+		return
+	}
+
+	jobs := make(chan Job, len(files))
+	results := make(chan Result, len(files))
 
 	var wg sync.WaitGroup
 
@@ -58,21 +76,23 @@ func main() {
 		go worker(w, jobs, results, &wg)
 	}
 
-	// Створюємо задачі
-	for j := 1; j <= numJobs; j++ {
-		jobs <- Job{
-			ID:       j,
-			Workload: rand.Intn(100) + 10, // випадкове навантаження
-		}
+	// Додаємо задачі у чергу
+	for i, file := range files {
+		jobs <- Job{ID: i + 1, Path: file}
 	}
-	close(jobs) // Завершення подачі задач
+	close(jobs)
 
-	wg.Wait() // Очікуємо завершення воркерів
+	wg.Wait()
 	close(results)
 
 	// Виводимо результати
 	for result := range results {
-		fmt.Printf("Worker %d processed Job %d (load %d) in %v → Output: %d\n",
-			result.WorkerID, result.Job.ID, result.Job.Workload, result.Processed, result.Output)
+		if result.Err != nil {
+			fmt.Printf("[Worker %d] ❌ Job %d (%s) error: %v\n",
+				result.WorkerID, result.Job.ID, result.Job.Path, result.Err)
+		} else {
+			fmt.Printf("[Worker %d] ✅ Job %d (%s): %d lines (%v)\n",
+				result.WorkerID, result.Job.ID, result.Job.Path, result.LineCount, result.Processed)
+		}
 	}
 }

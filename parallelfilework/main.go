@@ -1,62 +1,122 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"os"
+	"sort"
+	"strings"
 	"sync"
+
+	"github.com/unidoc/unioffice/document"
+	"github.com/xuri/excelize/v2"
 )
 
-func readFile(filename string, out chan<- []string, wg *sync.WaitGroup) {
+type DataRow struct {
+	Source string
+	Text   string
+}
+
+func readExcelFile(path string, out chan<- []DataRow, wg *sync.WaitGroup) {
 	defer wg.Done()
-
-	file, err := os.Open(filename)
+	f, err := excelize.OpenFile(path)
 	if err != nil {
-		fmt.Printf("Помилка відкриття %s: %v\n", filename, err)
+		fmt.Println("Помилка Excel:", err)
 		return
 	}
-	defer file.Close()
+	defer f.Close()
 
-	var lines []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Printf("Помилка зчитування %s: %v\n", filename, err)
+	rows, err := f.GetRows(f.GetSheetName(0))
+	if err != nil {
+		fmt.Println("Помилка зчитування рядків:", err)
 		return
 	}
 
-	out <- lines
+	var result []DataRow
+	for _, row := range rows {
+		if len(row) > 0 && strings.TrimSpace(row[0]) != "" {
+			result = append(result, DataRow{Source: path, Text: row[0]})
+		}
+	}
+	out <- result
+}
+
+func readWordFile(path string, out chan<- []DataRow, wg *sync.WaitGroup) {
+	defer wg.Done()
+	doc, err := document.Open(path)
+	if err != nil {
+		fmt.Println("Помилка Word:", err)
+		return
+	}
+
+	var result []DataRow
+	for _, para := range doc.Paragraphs() {
+		var textParts []string
+		for _, run := range para.Runs() {
+			textParts = append(textParts, run.Text())
+		}
+		text := strings.Join(textParts, "")
+		if strings.TrimSpace(text) != "" {
+			result = append(result, DataRow{Source: path, Text: text})
+		}
+	}
+	out <- result
+}
+
+func writeResultToExcel(data []DataRow, path string) error {
+	f := excelize.NewFile()
+	sheet := "Result"
+	f.NewSheet(sheet)
+
+	f.SetCellValue(sheet, "A1", "Source")
+	f.SetCellValue(sheet, "B1", "Text")
+
+	for i, row := range data {
+		f.SetCellValue(sheet, fmt.Sprintf("A%d", i+2), row.Source)
+		f.SetCellValue(sheet, fmt.Sprintf("B%d", i+2), row.Text)
+	}
+	return f.SaveAs(path)
 }
 
 func main() {
-	files := []string{"file1.txt", "file2.txt", "file3.txt"}
-
+	files := []string{"data1.xlsx", "data2.docx", "data3.xlsx"}
 	var wg sync.WaitGroup
-	results := make(chan []string, len(files))
+	out := make(chan []DataRow, len(files))
 
-	for _, f := range files {
+	for _, file := range files {
 		wg.Add(1)
-		go readFile(f, results, &wg)
+		if strings.HasSuffix(file, ".xlsx") {
+			go readExcelFile(file, out, &wg)
+		} else if strings.HasSuffix(file, ".docx") {
+			go readWordFile(file, out, &wg)
+		}
 	}
 
-	// Закриємо канал, коли всі горутини завершать роботу
 	go func() {
 		wg.Wait()
-		close(results)
+		close(out)
 	}()
 
-	// Збираємо всі рядки у єдиний масив
-	var allLines []string
-	for lines := range results {
-		allLines = append(allLines, lines...)
+	var allData []DataRow
+	for part := range out {
+		allData = append(allData, part...)
 	}
 
-	// Вивід результату
-	fmt.Println("Усі рядки з усіх файлів:")
-	for _, line := range allLines {
-		fmt.Println(line)
+	// Фільтрація: тільки ті, хто містять "Go"
+	filtered := []DataRow{}
+	for _, row := range allData {
+		if strings.Contains(strings.ToLower(row.Text), "go") {
+			filtered = append(filtered, row)
+		}
+	}
+
+	// Сортування за текстом
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Text < filtered[j].Text
+	})
+
+	err := writeResultToExcel(filtered, "result.xlsx")
+	if err != nil {
+		fmt.Println("Помилка запису:", err)
+	} else {
+		fmt.Println("✅ Результат збережено у result.xlsx")
 	}
 }
